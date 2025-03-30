@@ -4,7 +4,7 @@ from abc import abstractmethod
 import os
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Dict, Generic, Iterable, Iterator, Mapping, Protocol, Tuple, Type, Union, TypeVar, final, overload
+from typing import Any, Dict, Generic, Iterable, Iterator, Mapping, Protocol, Tuple, Type, Union, TypeVar, final, overload, Literal
 from contextlib import AbstractContextManager, contextmanager
 from matplotlib.backend_bases import key_press_handler
 from tifffile import TiffFile,TiffPageSeries
@@ -16,6 +16,7 @@ from tifffile.tifffile import TiffWriter
 
 MovieKey = TypeVar("MovieKey")
 
+##2d movie: Dictionary from movie key to a MovieSequence of images
 class Movie(Mapping[MovieKey,Sequence[ndarray]],AbstractContextManager,Generic[MovieKey]):
     @abstractmethod
     def __init__(self,movies:Sequence[MovieKey],frames:Dict[MovieKey,Sequence[int]],location:Union[Path,str],**kwargs) -> None: ...
@@ -41,17 +42,21 @@ class Movie(Mapping[MovieKey,Sequence[ndarray]],AbstractContextManager,Generic[M
     def __exit__(self, __exc_type: type[BaseException] | None, __exc_value: BaseException | None, __traceback: TracebackType | None) -> bool | None:
         return super().__exit__(__exc_type, __exc_value, __traceback);
 
+    @abstractmethod
+    def get_writer(self,location:Union[str,Path],**kwargs) -> AbstractContextManager[MovieWriter[MovieKey]]: ...
+
     @classmethod
     @abstractmethod
     def write(cls,movies:Sequence[MovieKey],frames:Dict[MovieKey,Sequence[int]],location:Union[str,Path],**kwargs) -> AbstractContextManager[MovieWriter[MovieKey]]: ...
     
-MKey = TypeVar("MKey",contravariant=True) #touch dum
+MKey = TypeVar("MKey",contravariant=True) #sequence moment
 class MovieWriter(Protocol[MKey]):
     def sequence(self,key:MKey)->AbstractContextManager[SequenceWriter]: ...
 
 class SequenceWriter(Protocol):
     def write(self,image:ndarray,**kwargs)->None: ...
 
+#why did I make this generic on movie key wtf
 class MovieSequence(Sequence[ndarray],Generic[MovieKey]):
     @overload
     def __getitem__(self,frame:int) -> ndarray: ...
@@ -125,6 +130,9 @@ class ImageMapMovie(KeyedMovie[MovieKey]):
         if key not in self.movies:
             raise IndexError(f"Movie {key} not in specified movie range: {self.movies}");
         return ImageMapSequence(self.frames[key],self.framePaths[key],self.folder,key);
+
+    def get_writer(self, location: str | Path, **kwargs) -> AbstractContextManager[ImageMapWriter[MovieKey], bool | None]:
+        return self.write(self.movies,self.frames,location,framePaths=self.framePaths)
 
     @classmethod
     @contextmanager
@@ -217,6 +225,9 @@ class MultiTiffMovie(KeyedMovie[MovieKey]):
             file.close();
         self.files = {};
         return super().__exit__(__exc_type, __exc_value, __traceback)
+    
+    def get_writer(self, location: str | Path, **kwargs) -> AbstractContextManager[MovieWriter[MovieKey], bool | None]:
+        return self.write(self.movies,self.frames,location,moviePaths=self.paths);
 
     @classmethod
     @contextmanager
@@ -284,6 +295,9 @@ class SingleTiffMovie(KeyedMovie[int]):
         self.file.close();
         self.file = None;
         return super().__exit__(__exc_type, __exc_value, __traceback)
+    
+    def get_writer(self, location: str | Path, **kwargs) -> AbstractContextManager[MovieWriter[int], bool | None]:
+        return self.write(self.movies,self.frames,location)
 
     @classmethod
     @contextmanager
@@ -335,6 +349,7 @@ class SingleTiffWriter(MovieWriter[int],SequenceWriter,AbstractContextManager):
         
         
 
+MOVIE_CLASS = Literal["images","multitiff","tiff"]
 IMAGE_MOVIE = "images"
 MULTI_TIFF_MOVIE = "multitiff"
 SINGLE_TIFF_MOVIE = "tiff"
@@ -342,17 +357,45 @@ SINGLE_TIFF_MOVIE = "tiff"
 movie_map:Dict[str,type[Movie]] = {IMAGE_MOVIE: ImageMapMovie, MULTI_TIFF_MOVIE: MultiTiffMovie, SINGLE_TIFF_MOVIE: SingleTiffMovie};
 
 
-@contextmanager
-def load_movie(reading_parameters:Dict[str,Any],location:Union[Path,str],keyword:Union[str,None]=None):
-    if "movie_types" in reading_parameters and keyword is not None:
-        type_info:Dict[str,Any] = reading_parameters["movie_types"][keyword];
-        movieClass:Type[Movie] = movie_map[type_info.get("movie_type",IMAGE_MOVIE)];
-        movieArgs:Dict[str,Any] = type_info["movie_params"];
-    else:
-        movieClass = movie_map[reading_parameters.get("movie_type",IMAGE_MOVIE)];
-        movieArgs = reading_parameters["movie_params"];
 
-    with movieClass(reading_parameters["movies"],reading_parameters["frames"],**movieArgs) as m:
+# """Reading Parameters struct definition:
+#     {
+#         "movies": Sequence of movie keys
+#         "frames": Sequence of frame keys
+
+#     }
+# """
+# @contextmanager
+# def load_movie(reading_parameters:Dict[str,Any],location:Union[Path,str],keyword:Union[str,None]=None,
+#                movies:Sequence[Any],
+#                frames:Sequence[Any],
+#                movie_type:str|type[Movie]|None=None,
+#                movie_params:Dict[str,Any]|None=None,
+#                movie_types:Dict[str,Dict[str,Any]]|None=None):
+#     d = locals();
+#     del d["reading_parameters"], d["location"], d["keyword"]
+#     reading_parameters.update({k:v for k,v in d.items() if v is not None})
+
+#     if "movie_types" in reading_parameters and keyword is not None:
+#         type_info:Dict[str,Any] = reading_parameters["movie_types"][keyword];
+#         movieClass:Type[Movie] = movie_map[type_info.get("movie_type",IMAGE_MOVIE)];
+#         movieArgs:Dict[str,Any] = type_info["movie_params"];
+#     else:
+#         if "movie_type" not in reading_parameters:
+#         cls = reading_parameters.get("movie_type",IMAGE_MOVIE)
+#         if isinstance(cls,type[Movie]):
+#             movieClass = cls
+#         else:
+#             movieClass = movie_map[reading_parameters.get("movie_type",IMAGE_MOVIE)];
+#         movieArgs = reading_parameters["movie_params"];
+
+#     with movieClass(reading_parameters["movies"],reading_parameters["frames"],location,**movieArgs) as m:
+#         yield m
+
+@contextmanager
+def load_movie(location:Union[Path,str],movies:Sequence[MovieKey],frames:Sequence[int],movie_type:MOVIE_CLASS|type[Movie]=IMAGE_MOVIE,**movie_params:Any):
+    movieClass = movie_map[movie_type] if isinstance(movie_type,str) else movie_type
+    with movieClass(movies,frames,location,**movie_params) as m:
         yield m
 
 # @contextmanager
