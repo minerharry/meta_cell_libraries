@@ -16,9 +16,10 @@ def apply_qc(in_tracks:Dict[int,Dict[int,DataFrame]],
         qc_logfile:Union[Path,str],
         centertype:str,
         keep:Dict[int,List[int]],
-        trim:Dict[Tuple[int,int],Tuple[int,int]],
+        trim:Dict[Tuple[int,int],Tuple[int|None,int|None]],
         removemov:List[int],
-        exclude:List[Tuple[int,int]],
+        exclude:List[Tuple[int,int]]|Dict[int,list[int]],
+        bounds:Dict[Tuple[int,int],Tuple[int|None,int|None]],
         minTrackLength:Union[None,int]=None,
         minTrackDisplacement:Union[None,float]=None,
         initialTrackDelay:Union[int,None]=None,
@@ -69,7 +70,8 @@ def apply_qc(in_tracks:Dict[int,Dict[int,DataFrame]],
             if track == -1:
                 trims[mov] = DefaultDict(lambda: (start,end));
                 log(f"applying manual trim: all tracks in movie {mov} limited to frames {start}-{end}")
-            else:
+        for (mov,track),(start,end) in trim.items():
+            if track != -1:
                 trims[mov][track] = (start,end);
                 log(f"applying manual trim: track {track} in movie {mov} limited to frames {start}-{end}")
             
@@ -88,32 +90,34 @@ def apply_qc(in_tracks:Dict[int,Dict[int,DataFrame]],
                 firstframe = framec.iloc[0]
                 lastframe = framec.iloc[-1]
 
-                if initialTrackDelay is not None:
-                    firstframe = firstframe+initialTrackDelay;
-                    
 
-                #check that input frames are in bounds
-                if start is None:
-                    start = firstframe
-                    #only apply initial track delay if no manual start specified
-                    if initialTrackDelay is not None:
-                        #only apply initial delay if not the start of the movie
-                        if start != 1:
-                            start += initialTrackDelay
-                            log(f"Applying automatic initial track delay: first frame of track {track} in movie {mov} trimmed from {start-initialTrackDelay} to {start}")
-                        else:
-                            log(f"track {track} in movie {mov} starts at the beginning of the movie, no track delay applied")
-                elif start < firstframe or start > lastframe:
-                    raise Exception(f'in movie {mov} track {track} beggining of trimming {start} is out of range {(firstframe,lastframe)}');
-                
-                if end is None:
-                    end = lastframe
-                elif end < firstframe or end > lastframe:
-                    raise Exception(f'in movie {mov} track {end} end of trimming {end} is out of range {(firstframe,lastframe)}');
-
-                if start >= end :
-                    raise Exception(f'in movie {mov} track {track} end of trimming {end} is smaller or equal than beggining of trimming {start}')
+                if (mov,t) not in bounds:
+                    #check that input frames are in bounds
+                    if start is None:
+                        start = firstframe
+                        #only apply initial track delay if no manual start specified
+                        if initialTrackDelay is not None:
+                            #only apply initial delay if not the start of the movie
+                            if start != 1:
+                                start += initialTrackDelay
+                                log(f"Applying automatic initial track delay: first frame of track {track} in movie {mov} trimmed from {start-initialTrackDelay} to {start}")
+                            else:
+                                log(f"track {track} in movie {mov} starts at the beginning of the movie, no track delay applied")
+                    elif start < firstframe or start > lastframe:
+                        raise Exception(f'in movie {mov} track {track} beggining of trimming {start} is out of range {(firstframe,lastframe)}');
                     
+                    if end is None:
+                        end = lastframe
+                    elif end < firstframe or end > lastframe:
+                        raise Exception(f'in movie {mov} track {end} end of trimming {end} is out of range {(firstframe,lastframe)}');
+
+                    if start >= end :
+                        raise Exception(f'in movie {mov} track {track} end of trimming {end} is smaller or equal than beggining of trimming {start}')
+                else:
+                    start,end = bounds[mov,t]
+                    start = firstframe if start is None or start < firstframe else start
+                    end = lastframe if end is None or end > lastframe else end
+
                 #get indices of desired first and last frames
                 ifirstframe = framec[framec==start].index[0]
                 ilastframe = framec[framec==end].index[0]
@@ -143,13 +147,21 @@ def apply_qc(in_tracks:Dict[int,Dict[int,DataFrame]],
                         log(f"removing track {itr} from movie {imov}: track displacement {d} too short")
         
 
-        #exclude tracks after visual inspection
-        #exclude=[[2,3],[2,4]]
-        #exclude=[[1,7]]                
-        for mov,track in exclude:
-            sampTrStatus[mov][track]=0
-            log(f"Manually exclduing track {track} from movie {mov}")
+        if isinstance(exclude,dict):
+            for mov,tracks in exclude.items():
+                for track in tracks:
+                    sampTrStatus[mov][track]=0
+                    log(f"Manually exclduing track {track} from movie {mov}")
+        else:
+            for mov,track in exclude:
+                sampTrStatus[mov][track]=0
+                log(f"Manually exclduing track {track} from movie {mov}")
         
+        #remove movies
+        for mov in removemov:
+            for itr in sampTrStatus[mov]: 
+                sampTrStatus[mov][itr]=0;
+            log(f"Manually removing movie {mov} from experiment")
 
         #only keep certain tracks
         #input: dict of elements of the form {movie:[track1,track2,...]}
@@ -159,10 +171,5 @@ def apply_qc(in_tracks:Dict[int,Dict[int,DataFrame]],
                 sampTrStatus[mov][itracks]=1
                 log(f"Manually including track {itracks} from movie {mov}")
 
-        #remove movies
-        for mov in removemov:
-            for itr in sampTrStatus[mov]: 
-                sampTrStatus[mov][itr]=0;
-            log(f"Manually removing movie {mov} from experiment")
                 
         return sampTrStatus, out_tracks
